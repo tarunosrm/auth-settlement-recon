@@ -1,0 +1,47 @@
+# ==============================================================================
+# PROJECT CONFIGURATION & METADATA (pyproject.toml)
+# This file acts as the ID card and build manual for the Python package.
+# ==============================================================================
+
+# THE FACTORY ENGINE:
+# Specifies the packaging build backend (Hatchling) used to assemble the package.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# APP DETAILS & PRODUCTION DEPENDENCIES:
+# Sets core metadata (name, version, description) and runtime constraints.
+[project]
+name = "authgen"
+version = "0.1.0"
+description = "Synthetic card authorization stream with reconciliation-grade anomaly injection"
+requires-python = ">=3.11"  # Enforces Python 3.11 or newer
+
+# Core libraries required to run:
+# - azure-eventhub: Streams synthetic events to Azure Event Hub
+# - pyyaml: Reads and parses configuration files
+dependencies = [
+    "azure-eventhub>=5.11",
+    "pyyaml>=6.0",
+]
+
+# DEVELOPER TOOLS:
+# Optional libraries needed only for local development, testing, and linting.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",  # Test framework
+    "ruff>=0.4",    # Linter and code formatter
+]
+
+# SHORTCUT TERMINAL COMMAND:
+# Creates a CLI entrypoint so typing `authgen` runs `src/authgen/cli.py:main`.
+[project.scripts]
+authgen = "authgen.cli:main"
+
+# SOURCE CODE LOCATION:
+# Tells Hatchling where the actual package source code lives to bundle it into a wheel.
+[tool.hatch.build.targets.wheel]
+packages = ["src/authgen"]
+
+[tool.ruff.lint]
+ignore = ["C408"]  # dict(...) kwargs read better than a literal for the 20-field message
