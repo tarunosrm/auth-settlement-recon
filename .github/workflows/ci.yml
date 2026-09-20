@@ -5,15 +5,16 @@ on:
   pull_request:
 
 jobs:
-  python:
+    python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      - run: pip install -e ".[dev]"     # installs the package + ruff + pytest in one step
       - run: ruff check .
+      - run: pytest -q                   # the step that makes the badge mean something
 
   terraform:
     runs-on: ubuntu-latest

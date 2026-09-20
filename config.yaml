@@ -1,0 +1,35 @@
+# ==============================================================================
+# RUNTIME CONFIGURATION (config.yaml)
+# This file serves as the simulation control panel. Adjust these parameters
+# to tweak generator behavior and stress-test pipelines without editing code.
+# ==============================================================================
+
+# REPRODUCIBILITY:
+# Seeds the pseudo-random number generator so runs produce identical datasets.
+seed: 42
+
+# MARKET BIAS & REGION:
+# Primary operating geography (Germany / EUR), influencing default currencies
+# and cross-border payment logic.
+home_country: "DE"
+
+# THROUGHPUT THROTTLE:
+# Target ingestion rate into Azure Event Hub (10 transactions per second).
+events_per_second: 10
+
+# AUDIT TRAIL / ORACLE:
+# Local path where ground-truth events and injected anomaly labels are recorded.
+# Downstream recon logic must detect breaks independently of this file.
+ledger_path: "data/auth_ledger.jsonl"
+
+# CHAOS DIAL (ANOMALY INJECTION RATES):
+# Probabilities of operational and network failure modes across the auth stream.
+anomalies:
+  # Terminal retries awaiting an issuer response; generates duplicate auth/RRNs (0.5%):
+  duplicate_send_rate: 0.005
+
+  # Issuer timeouts (response codes 68/91); leaves final settlement status uncertain (0.6%):
+  late_response_rate: 0.006
+
+  # Approvals followed immediately by reversals; transactions that must never settle (2.5%):
+  reversal_rate: 0.025
