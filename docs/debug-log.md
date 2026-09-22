@@ -22,6 +22,7 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | D-02 | First fix dropped `_emit`'s return contract | Code | 1 | ⚪ |
 | D-03 | `authgen stats` ignores configured ledger path | Code | 1 | 🟠 |
 | D-04 | Pointless walrus expression in distribution test | Code | 1 | ⚪ |
+| D-05 | Malformed ci.yml edit broke CI entirely — no local gate validated the workflow file | Code | 1 | 🔴 |
 | T-01 | A test that could not fail (vacuous invariant check) | Test | 1 | 🔴 |
 | T-02 | Self-contradictory duplicate test — could never pass | Test | 1 | 🔴 |
 | E-01 | `az login` OTP loop / email-code catch-22 | Env | 0 | 🟡 |
@@ -32,6 +33,7 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | N-04 | Rendered markdown copied instead of raw — doc structure lost | Doc | 1 | ⚪ |
 | N-05 | Verification gate flagged the doc's own fingerprint example — false positive traced | Doc | 1 | ⚪ |
 | N-06 | Documented fixes (T-01, D-04) never applied to code — linter caught both | Process | 1 | 🟠 |
+
 ---
 
 ## Code bugs
@@ -451,7 +453,7 @@ format, stop retrying the channel and change the encoding instead.
 ### N-05 — Gate flagged the doc's own fingerprint example: false positive traced ⚪
 **Phase**: 1 · **Found by**: the generator script's destination-verification gate
 
-**Symptom**: verification FAIL — one &#x20; found in the generated doc, whilethe utf-8 round-trip check passed (so the entity was in the embedded source atcopy time, not introduced by writing).
+**Symptom**: verification FAIL — one HTML space entity found in the generated doc, whilethe utf-8 round-trip check passed (so the entity was in the embedded source at copy time, not introduced by writing).
 
 **Investigation**: the failure locator printed the offending source line —which turned out to be this log's own N-04 entry, where the entity appearsdeliberately as an example of a corruption fingerprint. The chat-to-editorcopy of the Python block had contained zero injected entities; the transportwas clean. My initial hypothesis (whitespace-run entity injection by the chatclient) was plausible and wrong — the evidence overturned it.
 
@@ -466,7 +468,20 @@ format, stop retrying the channel and change the encoding instead.
 
 **Fix**: applied both edits, re-ran the full gate sequence(ruff check clean → pytest -q 11 passed) before committing.
 
-**Lesson**: documentation drifts from code the moment both are maintained byhand. The only claims a log (or README, or dashboard) should make are ones amachine has verified on the current commit. This is precisely why CI gatesexist.
+**Lesson**: documentation drifts from code the moment both are maintained byhand. The only claims a log (or README, or dashboard) should make are ones a machine has verified on the current commit. This is precisely why CI gatesexist.
+
+### D-05 — Workflow yaml syntax error disabled CI (caught by Actions, not locally) 🔴
+**Phase: 1** · File: .github/workflows/ci.yml (line 18, the pytest step edit)
+
+**Symptom**: GitHub Actions run #2 failed with Invalid workflow file ... yaml syntax on line 18; no jobs ran at all. Run #1 (Phase 0's file) had been green,isolating the defect to the edit.
+
+**Root cause**: the python job was edited by hand to add the install/pyteststeps. The malformed line passed every local check I ran — because no localcheck validates the workflow file. Ruff lints Python, terraform validatechecks HCL, but the file that gates everything else had no gate. CI config iscode; it shipped unlinted.
+
+**Investigation**: reproduced the parse error locally with PyYAML (already a project dependency): python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))" — the same error, the sameline, zero cloud round-trips.
+
+**Fix**: wholesale replacement with a known-good workflow; local yaml parsegreen before push; Actions green after.
+
+**Lesson**: every artifact that gates the pipeline needs a gate of its own —and "it parses" is a machine-checkable claim, so check it on the machinebefore pushing. (Follow-up: consider actionlint, the standard GitHubworkflow linter, as a local pre-push step.)
 ---
 
 
