@@ -23,6 +23,12 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | D-03 | `authgen stats` ignores configured ledger path | Code | 1 | 🟠 |
 | D-04 | Pointless walrus expression in distribution test | Code | 1 | ⚪ |
 | D-05 | Malformed ci.yml edit broke CI entirely — no local gate validated the workflow file | Code | 1 | 🔴 |
+| D-06 | Consumer crashed on the SDK's empty-wait heartbeat (`event=None`) | Code | 1 | 🔴 |
+| D-07 | Sync `receive()` blocks forever — timeout was dead code, tool froze | Code | 1 | 🔴 |
+| D-08 | Consumer handed the send-only credential — least-privilege worked, runbook didn't | Infra | 1 | 🔴 |
+| D-09 | Workspace `identity` block: failed on locked provider AND unnecessary for KV-backed scopes | Infra | 1 | 🟠 |
+| D-10 | Databricks Standard SKU deprecated — 400 mid-apply, partial apply absorbed by state | Infra | 1 | 🟠 |
+| D-11 | RBAC-backed Key Vault checks every caller — including the Databricks control plane | Infra | 1 | 🔴 |
 | T-01 | A test that could not fail (vacuous invariant check) | Test | 1 | 🔴 |
 | T-02 | Self-contradictory duplicate test — could never pass | Test | 1 | 🔴 |
 | E-01 | `az login` OTP loop / email-code catch-22 | Env | 0 | 🟡 |
@@ -31,8 +37,11 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | N-02 | PowerShell `>>` writes UTF-16 into `.gitignore` | Near-miss | 0 | 🟠 |
 | N-03 | Prose line pasted into `.gitignore` snippet | Near-miss | 0 | ⚪ |
 | N-04 | Rendered markdown copied instead of raw — doc structure lost | Doc | 1 | ⚪ |
-| N-05 | Verification gate flagged the doc's own fingerprint example — false positive traced | Doc | 1 | ⚪ |
+| N-05 | Gate flagged the doc's own fingerprint example — false positive traced | Doc | 1 | ⚪ |
 | N-06 | Documented fixes (T-01, D-04) never applied to code — linter caught both | Process | 1 | 🟠 |
+| N-07 | Almost adopted the namespace Root key — a reviewer called it "standard practice" | Near-miss | 1 | ⚪ |
+| N-08 | Ambiguous provider snippet placement — pasted at wrong nesting level | Near-miss | 1 | ⚪ |
+| N-09 | Deprecation migration kept a now-invalid sibling argument — plan aborted | Near-miss | 1 | ⚪ |
 
 ---
 
@@ -58,7 +67,7 @@ to both consumers — the ledger and the sink. Two consumers with different
 confidentiality requirements, one object. Classic single-source-two-consumers
 mistake.
 
-**Impact if unfixed:** the Eventhouse table would contain anomaly labels, so the
+**Impact if unfixed:** the analytics table would contain anomaly labels, so the
 Phase 3 recon engine would "find" breaks by reading them — a circular, worthless
 evaluation. Also, internal metadata bloat on every message in the stream.
 
@@ -189,6 +198,149 @@ reader who debugs them at 2 a.m.
 
 ---
 
+### D-05 — Workflow yaml syntax error disabled CI (caught by Actions, not locally) 🔴
+
+**Phase:** 1 · **File:** `.github/workflows/ci.yml` (line 18, the pytest step edit)
+
+**Symptom:** GitHub Actions run #2 failed with `Invalid workflow file ... yaml
+syntax on line 18`; no jobs ran at all. Run #1 (Phase 0's file) had been green,
+isolating the defect to the edit.
+
+**Root cause:** the python job was edited by hand to add the install/pytest
+steps. The malformed line passed every local check I ran — because **no local
+check validates the workflow file**. Ruff lints Python, `terraform validate`
+checks HCL, but the file that gates everything else had no gate. CI config is
+code; it shipped unlinted.
+
+**Investigation:** reproduced the parse error locally with PyYAML (already a
+project dependency):
+
+~~~powershell
+python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml', encoding='utf-8')); print('YAML OK')"
+~~~
+
+Same error, same line, zero cloud round-trips.
+
+**Fix:** wholesale replacement with a known-good workflow, written to disk by a
+verification script that parsed the yaml before commit; local parse green
+before push; Actions green after (verified on run #3 before this entry was
+committed — the log itself got gated).
+
+**Lesson:** every artifact that gates the pipeline needs a gate of its own —
+and "it parses" is a machine-checkable claim, so check it on the machine
+before pushing. (Follow-up: consider `actionlint`, the standard GitHub
+workflow linter, as a local pre-push step.)
+
+---
+
+### D-06 — Consumer crashed on the SDK's empty-wait heartbeat 🔴
+
+**Phase:** 1 · **File:** `scripts/consume_check.py` (`on_event`)
+
+**Symptom:** repeated `AttributeError("'NoneType' object has no attribute
+'body_as_str'")` from both partitions; no events summarized.
+
+**Root cause:** the azure-eventhub `receive(..., max_wait_time=N)` contract
+calls `on_event(partition_context, None)` whenever the wait expires with
+nothing to read — a heartbeat, not an error. My callback called
+`event.body_as_str()` unguarded. Decoding the spam revealed two stacked
+facts: the consumer had connected and authenticated cleanly (both partitions
+claimed — the infrastructure worked), and the hub was empty because the
+producer had not been run yet. My code crashed on the heartbeat instead of
+hearing the message. Mental model: the callback is an assistant checking an
+empty mailbox every 2 seconds; `None` is its "still nothing here" check-in,
+proving it is awake.
+
+**Fix:**
+
+~~~python
+def on_event(pc, event):
+    if event is None:              # heartbeat: wait expired, nothing to read
+        stats["idle_waits"] += 1
+        return
+    ...
+~~~
+
+plus a dedicated `on_error` handler and an `idle_waits` counter so "hub is
+empty" is visible as a number.
+
+**Verification:** superseded by D-08 — the first `read=200` run had not
+actually been achieved when this was first logged (N-06 pattern recurring in
+my own scaffolding). Confirmed only after D-08's credential fix:
+`read=203, rejects=0`.
+
+**Lesson:** read the callback contract before assuming inputs are always
+non-None — "timeout delivered as a None argument" is a common SDK idiom. And
+repeating error spam is often *signal*: this one was simultaneously a real
+bug (unguarded callback) and a status report (healthy listener, empty hub).
+
+---
+
+### D-07 — Sync `receive()` blocks forever: the timeout was dead code 🔴
+
+**Phase:** 1 · **File:** `scripts/consume_check.py`
+
+**Symptom:** the tool connected, then sat silent past its 60-second "timeout"
+— the summary line at the bottom of the script never ran.
+
+**Root cause:** two SDK contracts, one honored and one ignored. The heartbeat
+contract (D-06) was handled; the blocking contract was not:
+`client.receive()` (sync SDK) does not return until the client is closed —
+my deadline loop lived *after* that call, i.e. it was dead code by
+construction. I had also conflated `max_wait_time` (callback cadence) with
+total runtime. Caught by independent AI review; my D-06 "verification" claim
+had been written before any successful run existed.
+
+**Fix:** a watchdog thread owns the stop decision — it waits for the event
+target or the timeout, then `client.close()`, which unblocks `receive()`;
+`try/finally` guarantees the summary on every exit path (target, timeout,
+Ctrl+C); a `threading.Lock` guards the shared counters, since partition
+callbacks run on separate threads.
+
+**Verification:** consumer prints its summary at target and at timeout;
+empty hub self-diagnoses after 60 s instead of freezing.
+
+**Lesson:** a blocking call needs an explicit stop story — timeout-as-code
+(watchdog + close + finally), not timeout-as-wish (a loop placed after a
+call that never returns). Dead code after a blocking call is worse than no
+code: it documents an intent the runtime never honors.
+
+---
+
+### D-08 — Consumer handed the send-only credential 🔴
+
+**Phase:** 1 · **Files:** runbook/env setup vs `eventhub.tf`
+
+**Symptom:** consumer ran clean (no errors after D-06/D-07 fixes) but
+`read=0` — then timed out. The hub had data (portal metrics showed ~200
+incoming).
+
+**Root cause:** the producer credential was created send-only
+(`send=true, listen=false`) — correct least-privilege design — but the
+runbook loaded that same secret (`eventhub-send-conn`) into
+`EVENTHUB_CONNECTION_STRING` for the *consumer*. A consumer with a send-only
+key cannot open a receive link. Credentials are capabilities; one secret
+name had been carried across two operations with incompatible grants. The
+security design was right; the operational instructions bypassed it.
+
+**Fix:** a matching `listen-only` authorization rule in Terraform, its key
+stored as `eventhub-listen-conn`, and a two-credential runbook: Send →
+`eventhub-send-conn`, Listen → `eventhub-listen-conn`. A reviewer's quicker
+fix — the namespace RootManageSharedAccessKey — was rejected (see N-07).
+
+**Verification:** with the listen credential:
+`read=203 rejects=0 idle_waits=0`; kinds `{AUTH: 200, REVERSAL: 3}`; codes
+led by `00` (178) with `54`=8, `51`=5, `05`=4, `57`=4, `68`=2, `91`=2 —
+every distribution matching the generator's design (89% approval, ~4%
+expiry-driven declines).
+
+**Lesson:** when a tool "sees nothing," audit the grant before the data
+path — permission failures masquerade as empty queues. And least-privilege
+is a system property: every new operation needs its own capability, or the
+runbook silently widens the grant.
+
+---
+
 ## Test bugs
 
 ### T-01 — A test that could not fail 🔴
@@ -292,6 +444,120 @@ here the code was right. Deeper lesson: I shipped a test suite I had never
 executed. Together with T-01, this brackets the two failure modes of test
 quality: a test must be *able to fail* and *able to pass* — only between those
 poles does it carry information.
+
+---
+
+## Infrastructure & cloud bugs
+
+### D-09 — Workspace `identity` block: wrong for the locked provider AND the auth model 🟠
+
+**Phase:** 1 · **File:** `databricks.tf` · **Found by:** `terraform plan`
+
+**Symptom:** `Blocks of type "identity" are not expected here` on
+`azurerm_databricks_workspace`.
+
+**Root cause:** two stacked layers. (1) Version lock: the snippet was valid
+against a newer azurerm than the one my lock file pins — provider versions
+are part of the code's contract, so snippets are only portable when the
+version is. (2) The deeper error, mine: I assumed workload-identity-to-vault
+RBAC and removed the planned role assignment, reasoning that runtime reads
+bypass vault authorization entirely (see the correction below — that
+reasoning was wrong for RBAC-backed vaults).
+
+**Fix:** canonical pattern per Databricks' official Terraform examples — no
+`identity` block, no workspace-identity role assignment; workspace + KV-backed
+scope only. Caught by `plan` before any state change: zero cleanup, zero drift.
+
+**Verification:** plan → clean; scope created; listed in workspace settings
+as Azure Key Vault-backed.
+
+**Lesson:** the plan gate converts config bugs from state surgery into
+seconds. Verify synthesized resource blocks against `terraform providers`
+and canonical vendor examples — especially anything touching auth.
+
+> **CORRECTION (see D-11):** the claim that vault RBAC "isn't consulted
+> per-read" was wrong. Scope ACLs complement vault authorization at a
+> different layer; they do not replace it. Every fetch by the control-plane
+> app IS RBAC-checked. Left as written for chronology; corrected in D-11.
+
+---
+
+### D-10 — Databricks Standard SKU deprecated: 400 mid-apply, partial apply absorbed 🟠
+
+**Phase:** 1 · **File:** `databricks.tf` (`sku`)
+
+**Symptom:** `terraform apply` created the consumer group, then failed on the
+workspace: `DatabricksStandardSkuNotSupported ... Please use Premium SKU`.
+
+**Root cause:** snippet skew — Standard was the long-standing default when
+most guides were written; Microsoft deprecated it for new workspaces. Third
+instance of guide-age vs cloud-current-state divergence (after D-09's
+version lock and the ci.yml edit).
+
+**Fix:** `sku = "premium"`. The partial apply needed no surgery: the
+consumer group was already in state, and the next plan reconciled from
+actual state — exactly what the remote-state backend (ADR-010) is for.
+
+**Verification:** plan → 1 add; apply green; `workspace_url` output resolves.
+
+**Lesson:** partial applies are the normal case — each resource commits or
+fails independently, and the next plan reconciles. Cost note logged: Premium
+DBUs ~2× Standard; at this project's usage (small cluster, minutes-long
+demos) the delta is cents per session.
+
+---
+
+### D-11 — RBAC-backed Key Vault checks every caller, including the Databricks control plane 🔴
+
+**Phase:** 1 · **Files:** Databricks notebook; `databricks.tf` · **Found by:** runtime error after D-09's fix
+
+**Symptom:** `dbutils.secrets.get("eventhub", ...)` failed with
+`PERMISSION_DENIED ... ForbiddenByRbac`. The error named the caller:
+`name=AzureDatabricks;appid=2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`.
+
+**Root cause:** D-09's runtime model was wrong (see its correction notice).
+On an RBAC-enabled vault, **every** caller is RBAC-checked — including the
+Databricks control plane, which fetches secrets on behalf of notebooks using
+its first-party Enterprise App (`AzureDatabricks`). That app had no role on
+the vault, so the fetch was refused. What D-09 got right: the workspace
+managed identity is not on this path, and scope *creation* is authorized
+against the creator's vault permissions (which is why creation succeeded).
+What it got wrong: presenting Databricks scope ACLs as a replacement for
+vault authorization — ACLs gate which Databricks users may use a scope at
+the Databricks API layer; they complement vault RBAC and never replace it.
+Why the confusion is industry-wide: on legacy access-policy vaults, the
+scope-creation flow historically granted the AzureDatabricks app Get/List
+automatically, so the identity model stayed invisible. My vault was
+RBAC-backed from day one (ADR-011) — the modern choice that exposed it.
+
+**Fix:** `Key Vault Secrets User` granted to the AzureDatabricks app at
+vault scope. Immediate unblock: Azure CLI role assignment. Codified in
+Terraform via the azuread provider — role assignments take the service
+principal's **object ID**, not the app ID, so a data lookup is required:
+
+~~~hcl
+data "azuread_service_principal" "databricks" {
+  client_id = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+}
+
+resource "azurerm_role_assignment" "databricks_app_kv_read" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = data.azuread_service_principal.databricks.object_id
+}
+~~~
+
+**Verification:** error evidence confirmed (caller line + ForbiddenByRbac).
+Secret-read re-verification **PENDING** — to be amended when
+`dbutils.secrets.get` returns the secret after RBAC propagation
+(N-06 discipline: no green claim before the green run).
+
+**Lesson:** security boundaries are absolute, and error messages name the
+caller — read the caller line before theorizing. Two AIs proposed two
+architectures; one line of Azure's output adjudicated. Also: a reviewer's
+correct diagnosis can still arrive with a fix worth rejecting (the suggested
+quick test used the namespace Root key — rejected per N-07; the
+least-privilege shape held).
 
 ---
 
@@ -442,54 +708,136 @@ programmatically — removing clipboard rendering from the pipeline entirely.
 
 **Fix:** replaced the file wholesale from generated raw source and verified at
 the destination — markdown preview (Ctrl+Shift+V in VS Code), plus automated
-signature checks for corruption fingerprints (HTML space entities, escaped 
+signature checks for corruption fingerprints (HTML space entities, escaped
 underscores, missing pipes).
 
 **Lesson:** documents are artifacts too — verify them the way you verify code,
 at the destination, not at the source. When a transport channel corrupts a
 format, stop retrying the channel and change the encoding instead.
 
-
-### N-05 — Gate flagged the doc's own fingerprint example: false positive traced ⚪
-**Phase**: 1 · **Found by**: the generator script's destination-verification gate
-
-**Symptom**: verification FAIL — one HTML space entity found in the generated doc, whilethe utf-8 round-trip check passed (so the entity was in the embedded source at copy time, not introduced by writing).
-
-**Investigation**: the failure locator printed the offending source line —which turned out to be this log's own N-04 entry, where the entity appearsdeliberately as an example of a corruption fingerprint. The chat-to-editorcopy of the Python block had contained zero injected entities; the transportwas clean. My initial hypothesis (whitespace-run entity injection by the chatclient) was plausible and wrong — the evidence overturned it.
-
-**Fix**: an html.unescape() repair step plus an explicit "no entities ondisk" check; the self-referential example was reworded to prose ("HTML spaceentities") so the doc no longer carries a literal fingerprint that filters andgates will keep flagging.
-
-**Lesson**: a verification gate reports a pattern match, not a cause — everyhit needs individual tracing before repair, or you "fix" your own exampletext. And content that describes its own failure signatures will trip thechecks built to catch those signatures; keep such examples out ofmachine-verified artifacts.
-
-### N-06 — Fixes documented in this log but never applied to the code 🟠
-**Phase: 1** · Found by: ruff check (SIM222 flagged T-01's or True;F841 flagged D-04's walrus)
-
-**Root cause**: I wrote the fixes into this log during a documentationsession and never returned to the source files. The log recorded intent asif it were fact — the same failure mode as T-02's premature "11 passed"claim. A linter — a tool that never gets tired and never reads the log —caught both.
-
-**Fix**: applied both edits, re-ran the full gate sequence(ruff check clean → pytest -q 11 passed) before committing.
-
-**Lesson**: documentation drifts from code the moment both are maintained byhand. The only claims a log (or README, or dashboard) should make are ones a machine has verified on the current commit. This is precisely why CI gatesexist.
-
-### D-05 — Workflow yaml syntax error disabled CI (caught by Actions, not locally) 🔴
-**Phase: 1** · File: .github/workflows/ci.yml (line 18, the pytest step edit)
-
-**Symptom**: GitHub Actions run #2 failed with Invalid workflow file ... yaml syntax on line 18; no jobs ran at all. Run #1 (Phase 0's file) had been green,isolating the defect to the edit.
-
-**Root cause**: the python job was edited by hand to add the install/pyteststeps. The malformed line passed every local check I ran — because no localcheck validates the workflow file. Ruff lints Python, terraform validatechecks HCL, but the file that gates everything else had no gate. CI config iscode; it shipped unlinted.
-
-**Investigation**: reproduced the parse error locally with PyYAML (already a project dependency): python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))" — the same error, the sameline, zero cloud round-trips.
-
-**Fix**: wholesale replacement with a known-good workflow; local yaml parsegreen before push; Actions green after.
-
-**Lesson**: every artifact that gates the pipeline needs a gate of its own —and "it parses" is a machine-checkable claim, so check it on the machinebefore pushing. (Follow-up: consider actionlint, the standard GitHubworkflow linter, as a local pre-push step.)
 ---
 
+### N-05 — Gate flagged the doc's own fingerprint example: false positive traced ⚪
+
+**Phase:** 1 · **Found by:** the generator script's destination-verification gate
+
+**Symptom:** verification FAIL — one HTML space entity found in the generated
+doc, while the utf-8 round-trip check passed (so the entity was in the
+embedded source at copy time, not introduced by writing).
+
+**Investigation:** the failure locator printed the offending source line —
+which turned out to be this log's own N-04 entry, where the entity appears
+*deliberately* as an example of a corruption fingerprint. The chat-to-editor
+copy of the Python block had contained zero injected entities; the transport
+was clean. My initial hypothesis (whitespace-run entity injection by the chat
+client) was plausible and wrong — the evidence overturned it.
+
+**Fix:** an `html.unescape()` repair step plus an explicit "no entities on
+disk" check; the self-referential example was reworded to prose ("HTML space
+entities") so the doc no longer carries a literal fingerprint that filters
+and gates will keep flagging.
+
+**Lesson:** a verification gate reports a pattern match, not a cause — every
+hit needs individual tracing before repair, or you "fix" your own example
+text. And content that describes its own failure signatures will trip the
+checks built to catch those signatures; keep such examples out of
+machine-verified artifacts. (This entry itself briefly carried the literal
+fingerprint again during editing and had to be reworded — the lesson is
+load-bearing.)
+
+---
+
+### N-06 — Fixes documented in this log but never applied to the code 🟠
+
+**Phase:** 1 · **Found by:** `ruff check` (SIM222 flagged T-01's `or True`;
+F841 flagged D-04's walrus)
+
+**Root cause:** I wrote the fixes into this log during a documentation
+session and never returned to the source files. The log recorded intent as
+if it were fact — the same failure mode as T-02's premature "11 passed"
+claim. A linter — a tool that never gets tired and never reads the log —
+caught both.
+
+**Fix:** applied both edits, re-ran the full gate sequence (`ruff check`
+clean → `pytest -q` 11 passed) before committing.
+
+**Lesson:** documentation drifts from code the moment both are maintained by
+hand. The only claims a log (or README, or dashboard) should make are ones a
+machine has verified on the current commit. This is precisely why CI gates
+exist.
+
+---
+
+### N-07 — Almost adopted the namespace Root key ⚪
+
+**Phase:** 1
+
+**What almost happened:** after D-08, a reviewer's quick fix proposed using
+the namespace `RootManageSharedAccessKey` for the consumer, calling it
+"standard practice" for testing. Root grants Manage+Send+Listen over the
+entire namespace; "temporarily root" is the seed of "permanently root."
+
+**Fix:** rejected. The principled fix cost eight lines of Terraform and
+ninety seconds (D-08's `listen-only` rule).
+
+**Lesson:** convenience fixes that erode a security invariant aren't
+shortcuts — they're the incident, pre-enacted. Reviewers catch bugs; you
+still own the security review of their fixes.
+
+---
+
+### N-08 — Ambiguous provider snippet placement ⚪
+
+**Phase:** 1 · **File:** `main.tf` · **Found by:** `terraform plan`
+
+**What almost happened:** a provider-requirements snippet was given without
+stating it must nest inside `required_providers {}`; the natural reading
+placed it at the wrong level (`Unsupported argument "databricks"`).
+Recurred same session as N-09 — incomplete snippet context is a recurring
+guide-failure mode, now tracked as a pattern.
+
+**Fix:** moved the block inside `required_providers`; ran `terraform init`
+to fetch the new provider before planning.
+
+**Lesson:** instructions that omit "where" are half instructions. When
+applying a snippet, ask what structural context it assumes — nesting,
+imports, ordering — before pasting.
+
+---
+
+### N-09 — Deprecation migration left a now-invalid sibling argument ⚪
+
+**Phase:** 1 · **File:** `eventhub.tf` · **Found by:** `terraform plan`
+
+**Symptom:** plan aborted with `Invalid combination of arguments` —
+`namespace_id` and `resource_group_name` cannot coexist.
+
+**Root cause:** migrating `namespace_name` → `namespace_id` replaced the
+argument but left `resource_group_name` in place. The migration instruction
+showed the replacement without stating the required deletion (N-08's
+family, recurring); deprecation messages name the successor, never the
+siblings that must go. The deeper shape: an ARM resource ID *contains* the
+resource group and subscription — a separate `resource_group_name` isn't
+redundant but contradictory if the two ever disagree, so the provider
+encodes that as an ExactlyOneOf validation.
+
+**Fix:** deleted `resource_group_name` from every block using
+`namespace_id` (hub, both consumer groups, both auth rules).
+
+**Verification:** plan → 2 add, 0 destroy, no replacement of existing
+resources; apply green (typed `yes` manually — no `-auto-approve`).
+
+**Lesson:** treat a deprecation as a schema migration: the replacement
+argument changes which other arguments are legal. Provider validation
+errors are the schema teaching you the resource's real shape.
+
+---
 
 ## Watch list (anticipated, not yet hit)
 
 | ID | Risk | Planned response |
 |----|------|------------------|
-| W-01 | `terraform apply` fails on the Key Vault secret with an authorization error — Azure RBAC propagation lag (role assignment created seconds earlier) | Wait 2–3 min, re-run `apply` (idempotent — it resumes where it left off) |
+| W-01 | `terraform apply` fails on the Key Vault secret with an authorization error — Azure RBAC propagation lag (role assignment created seconds earlier) | Wait 2–3 min, re-run `apply` (idempotent — it resumes where it left off). A variant materialized as D-11: propagation-window failure on a role assignment — for a principal nobody predicted |
 | W-02 | CI fails `terraform fmt -check -recursive` on first push | Run `terraform fmt` locally, commit — the loop itself teaches the gate |
 | W-03 | Bare `authgen run` without `EVENTHUB_CONNECTION_STRING` raises a raw `KeyError` | Hardening: catch and print a friendly message pointing to env vars / `--dry-run` |
 
@@ -508,9 +856,42 @@ format, stop retrying the channel and change the encoding instead.
 4. **Contradictory specs inside tests** (T-02): assertions are requirements
    documents — two conflicting requirements means at least one is wrong, and
    the test run is where that gets discovered.
-5. **A gate hit is a hypothesis, not a verdict** (N-05): verification gatesflag patterns,
-   not causes — trace each hit to its source before repairing,or you corrupt 
-   the artifact while "fixing" it.
+5. **A gate hit is a hypothesis, not a verdict** (N-05): verification gates
+   flag patterns, not causes — trace each hit to its source before
+   repairing, or you corrupt the artifact while "fixing" it.
+6. **Recurring errors are status messages in disguise** (D-06): before
+   muting spam, decode what it is repeating — it may be reporting the very
+   condition you are hunting.
+7. **Timeouts are mechanisms, not wishes** (D-07): bound blocking APIs with
+   code that can actually stop them (watchdog + close + finally); never
+   place intended logic after a call that never returns.
+8. **AI-scaffolded code gets the same gates as human code** (D-06 through
+   D-11): six defects shipped in AI-generated scaffolding — including one
+   wrong architectural explanation that entered this log itself; all were
+   caught by independent AI review or machine gates, not by hope. No
+   "Verification:" claim is written before the run has actually happened —
+   including claims made by the assistant.
+9. **Every credential is a capability** (D-08, N-07): each operation needs
+   its own grant; treat any suggestion to widen a grant as a bug in the
+   suggestion.
+10. **Plan is a gate, not a formality** (D-09, N-08, N-09): config errors
+    caught by `plan` cost seconds; `apply` errors cost state. Read the plan
+    as a review artifact — and never `-auto-approve` past your own review.
+11. **Cloud services have expiry dates, and guides don't** (D-09, D-10):
+    provider versions and SKU lifecycles move faster than documentation.
+    Treat every guide — official, AI, or blog — as written for a moment
+    that may have passed; check against the lock file and the API's current
+    answer.
+12. **Error messages name the caller** (D-11): authorization failures
+    identify the exact principal that was refused — read that line before
+    any architecture theory. Two confident explanations disagreed; one line
+    of Azure output settled it.
+13. **When patch count and state uncertainty rise together, regenerate**
+    (N-04, and this log's own update tooling): a patch script needs every
+    anchor to match a document seen only through lossy transports; a
+    regeneration needs none. The second failure of the same class is the
+    signal to switch strategies, not to sharpen the anchor.
+
 ---
 
 *Related doc: `docs/failure-drills.md` (Phase 4) — deliberate chaos experiments.
