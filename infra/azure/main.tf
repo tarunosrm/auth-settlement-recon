@@ -10,6 +10,11 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    databricks = {
+      source  = "databricks/databricks"
+      version = "~> 1.60"
+    }
+
   }
 
   backend "azurerm" {
@@ -22,4 +27,10 @@ terraform {
 
 provider "azurerm" {
   features {}
+}
+
+
+provider "databricks" {
+  host      = azurerm_databricks_workspace.main.workspace_url
+  auth_type = "azure-cli" # uses your az login — CI stays validate-only
 }

@@ -22,9 +22,3 @@ resource "azurerm_role_assignment" "secrets_officer" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-resource "azurerm_key_vault_secret" "dummy" {
-  name         = "demo-secret"
-  value        = "replace-me"
-  key_vault_id = azurerm_key_vault.main.id
-  depends_on   = [azurerm_role_assignment.secrets_officer]
-}
