@@ -18,9 +18,15 @@ jobs:
       - run: pytest -q
   terraform:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dir: [infra/azure, infra/gcp]
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
       - run: terraform fmt -check -recursive
+        working-directory: ${{ matrix.dir }}
       - run: terraform init -backend=false
+        working-directory: ${{ matrix.dir }}
       - run: terraform validate
+        working-directory: ${{ matrix.dir }}
