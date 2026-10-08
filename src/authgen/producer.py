@@ -45,5 +45,24 @@ class EventHubSink:
             # producer's behaviour; consumer-side gaps show up in recon later.
             log.exception("Event Hub send failed; dropping %d message(s)", len(messages))
 
+    
+
     def close(self):
         self._producer.close()
+
+class PubSubSink:
+    """GCP Pub/Sub sink (same send() contract as EventHubSink; ADR-006)."""
+
+    def __init__(self):
+            from google.cloud import pubsub_v1
+            self._publisher = pubsub_v1.PublisherClient()
+            self._topic = os.environ["PUBSUB_TOPIC"]
+
+    def send(self, messages: list[dict]) -> None:
+            futures = [self._publisher.publish(self._topic, json.dumps(m).encode("utf-8"))
+                       for m in messages]
+            for f in futures:
+                try:
+                    f.result(timeout=30)
+                except Exception:
+                    log.exception("Pub/Sub publish failed; dropping %d message(s)", len(messages))

@@ -10,7 +10,7 @@ import yaml
 from .clock import LiveClock, SimulatedClock
 from .generator import AuthGenerator
 from .ledger import Ledger
-from .producer import EventHubSink, NullSink, StdOutSink
+from .producer import EventHubSink, NullSink, PubSubSink, StdOutSink
 
 
 def load_config(path: str) -> dict:
@@ -27,6 +27,8 @@ def cmd_run(args) -> None:
         sink = StdOutSink(sample=args.sample)
     elif args.sink == "none":
         sink = NullSink()
+    elif args.sink == "pubsub":
+        sink = PubSubSink()  # Route to GCP Pub/Sub
     else:
         sink = EventHubSink()  # needs EVENTHUB_CONNECTION_STRING + EVENTHUB_NAME
 
@@ -89,7 +91,7 @@ def main() -> None:
     run = sub.add_parser("run", help="generate and (optionally) send events")
     run.add_argument("--config", default="config.yaml")
     run.add_argument("--dry-run", action="store_true", help="no Event Hub; print samples")
-    run.add_argument("--sink", choices=["eventhub", "none"], default="eventhub")
+    run.add_argument("--sink", choices=["eventhub", "none", "pubsub"], default="eventhub")
     run.add_argument("--max-events", type=int, default=200)
     run.add_argument("--sim-day-minutes", type=float, default=0,
                      help="compress one 24h day into N minutes (0 = live clock)")
