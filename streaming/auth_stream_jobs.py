@@ -1,10 +1,13 @@
 """Event Hubs -> Delta. Idempotent by construction: MERGE on auth_id means
 replays, restarts, and in-stream duplicates never duplicate rows."""
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
 from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
 try:
-    dbutils  # noqa: F821  (notebooks/jobs inject it)
+    _ = dbutils  # notebooks/jobs inject dbutils; detect presence without calling it
 except NameError:
     from databricks.sdk.runtime import dbutils
 
@@ -33,7 +36,7 @@ def source():
         # first run only: read the retention backlog, not just live tail
         "eventhubs.startingPosition": '{"offset": "-1", "seqNo": -1}',
     }
-    raw = spark.readStream.format("eventhubs").options(**cfg).load()  # noqa: F821
+    raw = spark.readStream.format("eventhubs").options(**cfg).load()
     return (raw.select(F.from_json(F.col("body").cast("string"), SCHEMA).alias("m"),
                        F.col("enqueuedTime").alias("eh_enqueued_at"))
                .select("m.*", "eh_enqueued_at")
@@ -42,10 +45,10 @@ def source():
 def upsert(batch_df, _batch_id):
     batch_df.dropDuplicates(["auth_id"]).createOrReplaceTempView("auth_updates")
     spark.sql(f"MERGE INTO {DB}.{TABLE} t USING auth_updates s "
-              f"ON t.auth_id = s.auth_id WHEN NOT MATCHED THEN INSERT *")  # noqa: F821
+              f"ON t.auth_id = s.auth_id WHEN NOT MATCHED THEN INSERT *")
 
-spark.sql(f"CREATE DATABASE IF NOT EXISTS {DB}")        # noqa: F821
-spark.sql(f"CREATE TABLE IF NOT EXISTS {DB}.{TABLE} ({_ddl()}) USING DELTA")  # noqa: F821
+spark.sql(f"CREATE DATABASE IF NOT EXISTS {DB}")
+spark.sql(f"CREATE TABLE IF NOT EXISTS {DB}.{TABLE} ({_ddl()}) USING DELTA")
 
 (source().writeStream
    .foreachBatch(upsert)
