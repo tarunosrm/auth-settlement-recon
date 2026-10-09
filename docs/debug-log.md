@@ -12,6 +12,8 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 🔴 shipped bug (caused wrong behavior) · 🟠 latent (would have bitten later) ·
 🟡 environment/tooling · ⚪ near-miss (caught before impact)
 
+**Phase note:** 1.5 = the platform-migration era (Azure trial expiry → GCP, ADR-014).
+
 ---
 
 ## Index
@@ -29,10 +31,14 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | D-09 | Workspace `identity` block: failed on locked provider AND unnecessary for KV-backed scopes | Infra | 1 | 🟠 |
 | D-10 | Databricks Standard SKU deprecated — 400 mid-apply, partial apply absorbed by state | Infra | 1 | 🟠 |
 | D-11 | RBAC-backed Key Vault checks every caller — including the Databricks control plane | Infra | 1 | 🔴 |
+| D-12 | Paste transport corrupted class indentation — IndentationError at import | Code | 1.5 | 🔴 |
+| D-13 | Streaming job committed unlinted — CI caught B018/RUF100/F821 | Code | 1.5 | 🔴 |
 | T-01 | A test that could not fail (vacuous invariant check) | Test | 1 | 🔴 |
 | T-02 | Self-contradictory duplicate test — could never pass | Test | 1 | 🔴 |
 | E-01 | `az login` OTP loop / email-code catch-22 | Env | 0 | 🟡 |
 | E-02 | venv not found after repo folder was recreated | Env | 1 | 🟡 |
+| E-03 | Azure trial expiry + card wall → GCP migration (ADR-014) | Env | 1.5 | 🟡 |
+| E-04 | pytest Windows teardown crash after a green run — teardown ≠ failure | Env | 1.5 | 🟡 |
 | N-01 | Manual folder creation → nested clone risk | Near-miss | 0 | ⚪ |
 | N-02 | PowerShell `>>` writes UTF-16 into `.gitignore` | Near-miss | 0 | 🟠 |
 | N-03 | Prose line pasted into `.gitignore` snippet | Near-miss | 0 | ⚪ |
@@ -42,6 +48,8 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | N-07 | Almost adopted the namespace Root key — a reviewer called it "standard practice" | Near-miss | 1 | ⚪ |
 | N-08 | Ambiguous provider snippet placement — pasted at wrong nesting level | Near-miss | 1 | ⚪ |
 | N-09 | Deprecation migration kept a now-invalid sibling argument — plan aborted | Near-miss | 1 | ⚪ |
+| N-10 | `git mv` multi-source aborts atomically on an untracked file | Near-miss | 1.5 | ⚪ |
+| N-11 | CI matrix referenced a folder that did not exist yet — sibling leg canceled | Near-miss | 1.5 | ⚪ |
 
 ---
 
@@ -341,6 +349,69 @@ runbook silently widens the grant.
 
 ---
 
+### D-12 — Paste transport corrupted class indentation: IndentationError at import 🔴
+
+**Phase:** 1.5 · **File:** `src/authgen/producer.py` (`PubSubSink`)
+
+**Symptom:** `authgen run --sink pubsub` died at import with
+`IndentationError: expected an indented block after class definition on line 49`.
+After a re-paste, `ruff check` revealed the deeper state: the class had landed
+*inside* `EventHubSink` — header at four-space indent, methods at eight, EOF
+reached without a dedent.
+
+**Root cause:** the same chat transport that eats markdown structure (N-04)
+also eats Python leading whitespace — and did it twice with two *different*
+corruptions: first the body arrived de-indented, then the whole class nested
+inside its neighbor. Code blocks are not exempt from the transport's lossiness.
+
+**Fix:** cut the class and re-placed it at module level (header flush-left,
+methods at four spaces). Caught entirely locally — `ruff check` localized the
+damage with file and line numbers before anything was pushed. CI never saw it.
+
+**Verification:** `ruff check` silent → `pytest -q` 11 passed →
+`authgen run --sink pubsub --max-events 50` published successfully.
+
+**Lesson:** every pasted code block gets `ruff check` *before running
+anything* — the parser reports indentation damage with locations; the runtime
+only reports it as a bare traceback. And the local-gate habit only counts
+when actually run: this time it was, which is why the failure never left the
+laptop (contrast D-13).
+
+---
+
+### D-13 — Streaming job committed unlinted: CI caught what local gates missed 🔴
+
+**Phase:** 1.5 · **File:** `streaming/auth_stream_jobs.py` · **Found by:** GitHub Actions
+
+**Symptom:** CI python job red with four findings in one file — B018 (bare
+`dbutils` expression), RUF100 ×2 (dead `# noqa: F821` directives), F821
+(undefined name `spark`).
+
+**Root cause:** the file entered the repo as an *artifact* of the infra
+restructure (`git add -A`) without a local `ruff check` first — outside the
+normal edit→lint→commit flow. The gates existed; they were not run. Two
+latent defects inside: the scaffold used bare `spark` assuming notebook
+injection (valid in Databricks, invalid as a standalone script), and carried
+`noqa` suppressions that ruff's configuration never triggers — dead
+suppression comments.
+
+**Fix:** `ruff check --fix` cleared the RUF100s and import sorting; B018
+fixed by assigning to `_` (a real use of the name, preserving the
+presence-test intent); F821 fixed by creating the session explicitly
+(`spark = SparkSession.builder.getOrCreate()`) — which also makes the script
+runnable outside notebooks at all.
+
+**Verification:** local `ruff check` silent → `pytest -q` 11 passed → push →
+CI run #8 green, all three jobs (python, terraform ×2).
+
+**Lesson:** "run the gate locally" includes *newly created files*, not just
+edited ones — a five-second `ruff check` before every push makes CI green by
+construction. A red CI run on code never linted locally is a process failure
+first and a code failure second. (D-05's lesson, extended from workflow
+files to all files.)
+
+---
+
 ## Test bugs
 
 ### T-01 — A test that could not fail 🔴
@@ -548,9 +619,12 @@ resource "azurerm_role_assignment" "databricks_app_kv_read" {
 ~~~
 
 **Verification:** error evidence confirmed (caller line + ForbiddenByRbac).
-Secret-read re-verification **PENDING** — to be amended when
-`dbutils.secrets.get` returns the secret after RBAC propagation
-(N-06 discipline: no green claim before the green run).
+Runtime secret-read re-verification **superseded by the platform migration
+(E-03)** — the grant design was validated by independent review; the green
+read was never achieved before the subscription lapsed, and re-verification
+is deferred to any future Azure deployment (the IaC codification above
+re-applies the grant automatically). Recorded honestly rather than claimed
+green (N-06 discipline).
 
 **Lesson:** security boundaries are absolute, and error messages name the
 caller — read the caller line before theorizing. Two AIs proposed two
@@ -621,6 +695,59 @@ pip install -e ".[dev]"     # reinstall — the editable install is also path-bo
 **Lesson:** a venv (and an editable install) is tied to its path — cheap to
 recreate (2 minutes), never worth debugging. Recreate both *together* whenever
 the project directory changes.
+
+---
+
+### E-03 — Azure trial expiry + card wall → GCP migration (ADR-014) 🟡
+
+**Phase:** 1.5 · **Symptom window:** the platform pivot
+
+**What happened:** the Azure free trial reached expiry; a replacement free
+account failed on debit-card verification; spending real money was out of
+scope. GCP's trial verified successfully on the same card (₹28,797 / 90 days,
+project `privacyai-501020`).
+
+**Response (ADR-014):** GCP-native as the primary live environment —
+Pub/Sub (ingress), Dataflow/Beam (compute), BigQuery (analytics) — with the
+Azure stack preserved as code in `infra/azure/`, one `terraform apply` from
+revival when funding exists. Migration surface: budget alert (₹2,500) →
+gcloud auth (account + project + ADC) → GCS state bucket (the bootstrap
+paradox, round two) → `infra/gcp` apply (topic, 7-day subscription, BigQuery
+dataset) → `PubSubSink` behind ADR-006's interface.
+
+**Verification:** infra applied; repo restructured (`infra/azure`,
+`infra/gcp`, `scripts/`, `streaming/`); CI matrix green on both cloud
+configs; first 50 synthetic auths published and pulled back via
+`gcloud pubsub subscriptions pull` — decoded with full RRN/MCC/amount
+fidelity, including cross-border and USD transactions.
+
+**Lesson:** account lifecycle (expiry, card gating) is an operational
+reality, not an exception. Portability by design — sink interface,
+cloud-agnostic Python, Terraform per cloud — turned a platform loss into a
+documented pivot and a two-cloud portfolio artifact.
+
+---
+
+### E-04 — pytest Windows teardown crash after a green run 🟡
+
+**Phase:** 1.5
+
+**Symptom:** `pytest -q` printed `11 passed`, then crashed during teardown:
+`PermissionError: [WinError 5] ... pytest-of-<user>\pytest-current` — a temp
+symlink locked by another process (VS Code).
+
+**Resolution:** the failure was post-run *cleanup*, not test execution. The
+distinction matters: teardown noise after a green run may be consciously
+ignored — here with a stated reason (CI runs Linux, where this Windows
+cleanup path does not exist, so the badge is unaffected). Recurrence cure:
+delete the stale temp folder once
+(`Remove-Item -Recurse -Force "$env:TEMP\pytest-of-<user>"`).
+
+**Lesson:** read *where* in the lifecycle a failure occurs — during the
+tests (real) or after them (hygiene). "All tests passed AND the framework
+crashed afterwards" demands a documented decision, not a shrug: the same
+distinction as D-06's heartbeats — spam that is signal, ignored only with a
+reason on record.
 
 ---
 
@@ -833,6 +960,48 @@ errors are the schema teaching you the resource's real shape.
 
 ---
 
+### N-10 — `git mv` multi-source aborts atomically on an untracked file ⚪
+
+**Phase:** 1.5
+
+**What happened:** during the restructure,
+`git mv main.tf eventhub.tf ... infra/azure/` failed with "not under version
+control" — `eventhub.tf` and `databricks.tf` had been created but never
+committed. Fear: a half-completed move. Verification with `git status`: git
+had moved *nothing* — multi-source `git mv` validates all sources before
+executing any of them (atomic abort, despite alarming output).
+
+**Fix:** filesystem `Move-Item *.tf infra\azure\` + `git add -A`; git
+re-detected the renames by content at commit time.
+
+**Lesson:** `git mv` operates on tracked files only. Know each tool's
+precondition before multi-argument operations — and verify state with
+`git status` rather than trusting either the error message or a first
+reading of it.
+
+---
+
+### N-11 — CI matrix referenced a folder that did not exist yet ⚪
+
+**Phase:** 1.5 · **File:** `.github/workflows/ci.yml`
+
+**What happened:** the new terraform matrix included `infra/gcp` before that
+folder existed in the repo. Result: a red leg (`No such file or directory`)
+— and, with fail-fast (the default), the `infra/azure` leg was *canceled*,
+displaying ⚠️ — a third state that is neither pass nor fail. One red run,
+two lessons.
+
+**Fix:** created `infra/gcp/` with real content (topic, subscription,
+BigQuery dataset) — the honest fix, since the folder was required anyway.
+Optional hardening applied: `fail-fast: false` so matrix legs always report
+independently.
+
+**Lesson:** CI config is a set of promises about repo layout — every
+referenced path must exist at the commit being tested. And a canceled matrix
+leg has no verdict: ⚠️ must not be read as green or red.
+
+---
+
 ## Watch list (anticipated, not yet hit)
 
 | ID | Risk | Planned response |
@@ -866,8 +1035,9 @@ errors are the schema teaching you the resource's real shape.
    code that can actually stop them (watchdog + close + finally); never
    place intended logic after a call that never returns.
 8. **AI-scaffolded code gets the same gates as human code** (D-06 through
-   D-11): six defects shipped in AI-generated scaffolding — including one
-   wrong architectural explanation that entered this log itself; all were
+   D-13): eight defects shipped in AI-generated scaffolding — including one
+   wrong architectural explanation that entered this log itself, and two
+   paste-transport corruptions of Python source; all were
    caught by independent AI review or machine gates, not by hope. No
    "Verification:" claim is written before the run has actually happened —
    including claims made by the assistant.
