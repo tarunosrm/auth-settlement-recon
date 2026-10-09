@@ -28,9 +28,17 @@ def cmd_run(args) -> None:
     elif args.sink == "none":
         sink = NullSink()
     elif args.sink == "pubsub":
-        sink = PubSubSink()  # Route to GCP Pub/Sub
-    else:
-        sink = EventHubSink()  # needs EVENTHUB_CONNECTION_STRING + EVENTHUB_NAME
+        try:
+            sink = PubSubSink()
+        except KeyError as e:
+            sys.exit(f"Missing env var {e}. Set PUBSUB_TOPIC (and run "
+                     "`gcloud auth application-default login`), or use --dry-run.")
+    else:  # eventhub
+        try:
+            sink = EventHubSink()
+        except KeyError as e:
+            sys.exit(f"Missing env var {e}. Load it from Key Vault (see README), "
+                     "or use --dry-run / --sink none.")
 
     if args.sim_day_minutes:
         clock, pace = SimulatedClock(args.sim_day_minutes), args.sim_sleep
@@ -56,9 +64,9 @@ def cmd_run(args) -> None:
             sink.close()
 
 
-def cmd_stats(_args) -> None:
+def cmd_stats(args) -> None:
     from collections import Counter
-    ledger = Ledger("data/auth_ledger.jsonl")
+    ledger = Ledger(args.ledger)
     kinds, codes, tags = Counter(), Counter(), Counter()
     amounts, dups, revs = [], 0, 0
     for r in ledger.iter_records():
@@ -100,6 +108,7 @@ def main() -> None:
     run.set_defaults(func=cmd_run)
 
     st = sub.add_parser("stats", help="summarize the ledger")
+    st.add_argument("--ledger", default="data/auth_ledger.jsonl")
     st.set_defaults(func=cmd_stats)
 
     args = ap.parse_args()
