@@ -56,3 +56,40 @@ resource "google_bigquery_dataset" "recon" {
   location   = var.gcp_region
   depends_on = [google_project_service.services["bigquery.googleapis.com"]]
 }
+
+resource "google_bigquery_table" "auth_events" {
+  dataset_id          = google_bigquery_dataset.recon.dataset_id
+  table_id            = "auth_events"
+  deletion_protection = false   # safe for demo environments
+
+  schema = jsonencode([
+    { name = "auth_id",       type = "STRING",  mode = "REQUIRED" },
+    { name = "event_kind",    type = "STRING" },
+    { name = "rrn",           type = "STRING" },
+    { name = "stan",          type = "STRING" },
+    { name = "card_token",    type = "STRING" },
+    { name = "card_scheme",   type = "STRING" },
+    { name = "merchant_id",   type = "STRING" },
+    { name = "merchant_name", type = "STRING" },
+    { name = "mcc",           type = "STRING" },
+    { name = "amount_minor",  type = "INT64" },
+    { name = "currency",      type = "STRING" },
+    { name = "response_code", type = "STRING" },
+    { name = "timestamp_utc", type = "STRING" },
+    { name = "ingest_time",   type = "TIMESTAMP" },
+  ])
+  depends_on = [google_project_service.services]
+}
+
+resource "google_bigquery_table" "auth_dead_letter" {
+  dataset_id          = google_bigquery_dataset.recon.dataset_id
+  table_id            = "auth_dead_letter"
+  deletion_protection = false
+
+  schema = jsonencode([
+    { name = "raw_payload", type = "STRING" },
+    { name = "error",       type = "STRING" },
+    { name = "timestamp",   type = "TIMESTAMP" },
+  ])
+  depends_on = [google_project_service.services]
+}
