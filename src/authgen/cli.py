@@ -23,6 +23,9 @@ def cmd_run(args) -> None:
     ledger = Ledger(cfg.get("ledger_path", "data/auth_ledger.jsonl"))
     rng = random.Random(cfg.get("seed", 42))
 
+    if args.seed is not None:
+        rng = random.Random(args.seed)
+
     if args.dry_run:
         sink = StdOutSink(sample=args.sample)
     elif args.sink == "none":
@@ -105,6 +108,8 @@ def main() -> None:
                      help="compress one 24h day into N minutes (0 = live clock)")
     run.add_argument("--sim-sleep", type=float, default=0.05)
     run.add_argument("--sample", type=int, default=3)
+    run.add_argument("--seed", type=int, default=None,
+                 help="Override config seed; omit for config default")
     run.set_defaults(func=cmd_run)
 
     st = sub.add_parser("stats", help="summarize the ledger")

@@ -223,3 +223,4 @@ __marimo__/
 *.tfstate.*
 *.tfvars
 data/
+docs/stream-processing-enhancement-ideas-gemini.txt
