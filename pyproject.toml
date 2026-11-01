@@ -39,11 +39,12 @@ gcp = ["google-cloud-pubsub>=2.21"]
 # Creates a CLI entrypoint so typing `authgen` runs `src/authgen/cli.py:main`.
 [project.scripts]
 authgen = "authgen.cli:main"
+settlegen = "settlegen.cli:main"
 
 # SOURCE CODE LOCATION:
 # Tells Hatchling where the actual package source code lives to bundle it into a wheel.
 [tool.hatch.build.targets.wheel]
-packages = ["src/authgen"]
+packages = ["src/authgen", "src/settlegen"]
 
 [tool.ruff.lint]
-ignore = ["C408"]  # dict(...) kwargs read better than a literal for the 20-field message
+ignore = ["C408" ,"DTZ011"]  # dict(...) kwargs read better than a literal for the 20-field message;DTZ011: settlement date intentionally defaults to today when not overridden
