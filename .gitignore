@@ -224,3 +224,4 @@ __marimo__/
 *.tfvars
 data/
 docs/stream-processing-enhancement-ideas-gemini.txt
+.pytest_tmp/

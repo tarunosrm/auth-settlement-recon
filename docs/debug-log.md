@@ -50,6 +50,9 @@ my evidence of debugging discipline — symptom → hypothesis → fix → verif
 | N-09 | Deprecation migration kept a now-invalid sibling argument — plan aborted | Near-miss | 1 | ⚪ |
 | N-10 | `git mv` multi-source aborts atomically on an untracked file | Near-miss | 1.5 | ⚪ |
 | N-11 | CI matrix referenced a folder that did not exist yet — sibling leg canceled | Near-miss | 1.5 | ⚪ |
+| N-12 | DirectRunner looked alive while the Pub/Sub source had stalled | Near-miss | 1.5 | ⚪ |
+| N-13 | `gcloud --format="value(...)"` on nested fields: misleading blank lines | Near-miss | 1.5 | ⚪ |
+| N-14 | Fixed seed + fresh per-process dedupe state = duplicates at the destination | Near-miss | 1.5 | ⚪ |
 
 ---
 
@@ -1002,6 +1005,117 @@ leg has no verdict: ⚠️ must not be read as green or red.
 
 ---
 
+### N-12 — DirectRunner looked alive while the Pub/Sub source had stalled ⚪
+
+**Phase:** 1.5 · **File:** `streaming/auth_pipeline.py` (DirectRunner run)
+
+**Symptom:** the streaming process stayed up — no error, no exit — while
+`recon.auth_events` stopped gaining rows. The run looked healthy for the
+whole observation window.
+
+**Root cause:** DirectRunner is the local test runner, not a
+streaming-grade runner. Its Pub/Sub source can stall silently: the process
+lives, the source stops delivering. "Is the process alive?" and "is data
+flowing?" are two different questions, and only the second one matters.
+
+**Fix:** judge the pipeline by its sink — poll row counts on
+`recon.auth_events` and watch the delta per interval, not process liveness.
+For sustained streaming the upgrade path is DataflowRunner; DirectRunner
+stays as the free local harness.
+
+**Verification:** the session's row-count checks caught it: process alive,
+table frozen. Judged by `SELECT COUNT(*)` deltas — which is why the stall
+was caught before any recon logic consumed stale data.
+
+**Lesson:** liveness is not progress. A pipeline is working only when its
+sink changes — the same discipline as D-07's summary line: judge the
+consumer by `read=N`, not by the absence of errors.
+
+---
+
+### N-13 — `gcloud --format="value(...)"` on nested fields prints misleading blank lines ⚪
+
+**Phase:** 1.5 · **File:** none — gcloud CLI investigation
+
+**Symptom:** projecting a nested field with
+`gcloud … --format="value(<nested path>)"` printed one blank line per
+record — output that reads as "no data" while the table had rows.
+
+**Root cause:** the projection does not fail; it emits an empty string per
+matched record. Silence per record, not an error: the query ran, the
+projection did not address the data. A tooling contract gap, not a data
+gap.
+
+**Fix:** establish presence with a format that cannot lie — plain
+`gcloud pubsub subscriptions pull --limit=N` (auto-decodes base64) or
+`--format="json"` — then narrow to `value()` projections on flat fields.
+
+**Verification:** the same pull re-run with `--format="json"` returned the
+records — data existed; the projection was the defect.
+
+**Lesson:** empty output has at least three meanings: no data, no
+permission (D-08), bad projection. Distinguish them by switching output
+formats before concluding anything about the data.
+
+---
+
+### N-14 — Fixed seed + fresh per-process dedupe state = duplicates at the destination ⚪
+
+**Phase:** 1.5 · **File:** `streaming/auth_pipeline.py` (dedupe stage, by
+`auth_id`) · **Status:** 26 duplicate rows identified in the session;
+handling decision open — Option A on the table: keep as teaching material
+(the session's recommendation)
+
+**Symptom:** `recon.auth_events` held 98 rows for 52 unique `auth_id`s —
+the same messages ingested more than once. Real rows, not a display
+artifact.
+
+**Root cause:** two properties combined. (1) The generator runs from a
+fixed seed — reproducibility by design — so every pipeline run replays the
+identical message stream. (2) The pipeline's dedupe state is per-process
+and in-memory: each run starts empty, so every replayed message looks new.
+Dedupe-in-flight works within one run only; across runs, the destination
+accumulates. The arithmetic, under the reading that the 26 are exact
+repeats: 98 rows = 72 distinct + 26 duplicates; the 72 distinct rows span
+52 `auth_id`s, so 20 rows sit above the one-row-per-`auth_id` baseline —
+distinct same-`auth_id` events (e.g. reversals), which is why
+unique-`auth_id` counts alone understate duplicates.
+
+**Fix:** idempotency moves to the sink: MERGE on a key that identifies one
+logical event. For the Phase 2 settlements loader the natural key is
+`settlement_id` — settled records carry no duplicate-send anomaly class.
+For `auth_events` the key needs care: a duplicate-send is payload-identical
+to its original by design (T-02), so a key that collapses the pair would
+erase the very anomaly the Phase 3 engine must detect. The key choice — and
+whether the stream needs a per-transmission identifier — is an open Phase 2
+ADR decision.
+
+**Verification:** counted from the table itself with SQL — 98 rows, 52
+unique `auth_id`s, 26 duplicate rows (session analysis). Re-derivation for
+the next time the table is queried:
+
+~~~sql
+SELECT
+  COUNTIF(c > 1)  AS rrn_values_with_copies,
+  SUM(c - 1)      AS surplus_rows
+FROM (
+  SELECT rrn, COUNT(*) AS c
+  FROM `privacyai-501020.recon.auth_events`
+  GROUP BY rrn
+);
+-- whichever column reproduces 26 is the definition the session used;
+-- if neither does, re-derive before Phase 3 builds on the number
+~~~
+
+**Lesson:** exactly-once is a destination property, not a pipeline
+property. Any "the pipeline deduplicates" claim decays the moment state
+resets — restart, redeploy, replay. Enforce idempotency where rows land,
+and choose the key before you need it: too coarse (bare `auth_id`) erases
+distinct events; too fine (the payload itself) erases the deliberate
+duplicate-send anomaly.
+
+---
+
 ## Watch list (anticipated, not yet hit)
 
 | ID | Risk | Planned response |
@@ -1061,6 +1175,14 @@ leg has no verdict: ⚠️ must not be read as green or red.
     anchor to match a document seen only through lossy transports; a
     regeneration needs none. The second failure of the same class is the
     signal to switch strategies, not to sharpen the anchor.
+
+14. **Liveness is not progress; dedupe-in-flight is not exactly-once**
+    (N-12, N-14): judge a pipeline by its sink — row deltas at the
+    destination, not a living process. Enforce idempotency where rows land
+    (MERGE on a logical-event key) so replays become harmless — and choose
+    that key before you need it: too coarse (bare `auth_id`) erases
+    distinct events; too fine (the payload itself) erases the deliberate
+    duplicate-send anomaly.
 
 ---
 
