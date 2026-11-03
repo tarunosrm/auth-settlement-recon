@@ -35,16 +35,16 @@ resource "google_bigquery_table" "settlements" {
   # design (ADR-002 parallel): anomalies live in data/settle_ledger.jsonl,
   # and Phase 3 detects them from the data itself.
   schema = jsonencode([
-    { name = "settlement_id",   type = "STRING",    mode = "REQUIRED" },
-    { name = "auth_id",         type = "STRING",    mode = "REQUIRED" },
-    { name = "rrn",             type = "STRING",    mode = "REQUIRED" },
-    { name = "amount_minor",    type = "INT64",     mode = "REQUIRED" },
-    { name = "currency",        type = "STRING",    mode = "REQUIRED" },
-    { name = "fee_minor",       type = "INT64",     mode = "REQUIRED" },
-    { name = "settlement_date", type = "DATE",      mode = "REQUIRED" },
-    { name = "scheme",          type = "STRING",    mode = "REQUIRED" },
-    { name = "ingested_at",     type = "TIMESTAMP", mode = "NULLABLE" },
-    { name = "source_file",     type = "STRING",    mode = "NULLABLE" },
+    { name = "settlement_id", type = "STRING", mode = "REQUIRED" },
+    { name = "auth_id", type = "STRING", mode = "REQUIRED" },
+    { name = "rrn", type = "STRING", mode = "REQUIRED" },
+    { name = "amount_minor", type = "INT64", mode = "REQUIRED" },
+    { name = "currency", type = "STRING", mode = "REQUIRED" },
+    { name = "fee_minor", type = "INT64", mode = "REQUIRED" },
+    { name = "settlement_date", type = "DATE", mode = "REQUIRED" },
+    { name = "scheme", type = "STRING", mode = "REQUIRED" },
+    { name = "ingested_at", type = "TIMESTAMP", mode = "NULLABLE" },
+    { name = "source_file", type = "STRING", mode = "NULLABLE" },
   ])
 
   # Audit columns are NULLABLE and written by the loader on INSERT only.
@@ -72,14 +72,14 @@ resource "google_bigquery_table" "settlements_staging" {
   # (the curated/ GCS object), never the raw file: two identical source rows
   # that match no target row would BOTH insert - a silent double count.
   schema = jsonencode([
-    { name = "settlement_id",   type = "STRING", mode = "REQUIRED" },
-    { name = "auth_id",         type = "STRING", mode = "REQUIRED" },
-    { name = "rrn",             type = "STRING", mode = "REQUIRED" },
-    { name = "amount_minor",    type = "INT64",  mode = "REQUIRED" },
-    { name = "currency",        type = "STRING", mode = "REQUIRED" },
-    { name = "fee_minor",       type = "INT64",  mode = "REQUIRED" },
-    { name = "settlement_date", type = "DATE",   mode = "REQUIRED" },
-    { name = "scheme",          type = "STRING", mode = "REQUIRED" },
+    { name = "settlement_id", type = "STRING", mode = "REQUIRED" },
+    { name = "auth_id", type = "STRING", mode = "REQUIRED" },
+    { name = "rrn", type = "STRING", mode = "REQUIRED" },
+    { name = "amount_minor", type = "INT64", mode = "REQUIRED" },
+    { name = "currency", type = "STRING", mode = "REQUIRED" },
+    { name = "fee_minor", type = "INT64", mode = "REQUIRED" },
+    { name = "settlement_date", type = "DATE", mode = "REQUIRED" },
+    { name = "scheme", type = "STRING", mode = "REQUIRED" },
   ])
   depends_on = [google_project_service.services]
 }
